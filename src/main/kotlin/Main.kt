@@ -15,6 +15,7 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private const val DEFAULT_COMPRESSION_LEVEL: Double = 0.5
 
+@OptIn(ExperimentalPathApi::class)
 suspend fun main(args: Array<String>) {
     val startTime = System.currentTimeMillis()
 
@@ -86,7 +87,6 @@ suspend fun main(args: Array<String>) {
     }
     outputDirectory.createDirectories()
 
-    @OptIn(ExperimentalPathApi::class)
     val comicFiles = inputDirectory.walk()
         .filter {
             it.extension.equals("cbz", true) && !it.startsWith(outputDirectory)
@@ -117,8 +117,14 @@ suspend fun main(args: Array<String>) {
     val endTime = System.currentTimeMillis()
     val runtime = (endTime - startTime).milliseconds
     println("Finished in $runtime")
+
+    val inputSize = comicFiles.sumOf { it.fileSize() }
+    val outputSize = outputDirectory.walk().sumOf { it.fileSize() }
+    val difference = inputSize - outputSize
+    println("Total size reduced from ${toMb(inputSize)}MB to ${toMb(outputSize)}MB, saved ${toMb(difference)}MB")
 }
 
+@OptIn(ExperimentalPathApi::class)
 private suspend fun compressComic(
     comicFile: Path,
     output: Path,
@@ -133,7 +139,6 @@ private suspend fun compressComic(
         FileSystems.newFileSystem(comicFile)
     }.use { zipFileSystem ->
         val paths = zipFileSystem.rootDirectories.flatMap {
-            @OptIn(ExperimentalPathApi::class)
             it.walk()
         }
         val concurrentTasks = Runtime.getRuntime().availableProcessors()
@@ -177,8 +182,11 @@ private suspend fun compressComic(
     println("Finalizing \"$comicFile\"...")
     zipDirectoryContents(tempDir, output)
     println("Finished compressing \"$comicFile\"")
+    val inputSize = comicFile.fileSize()
+    val outputSize = output.fileSize()
+    val difference = inputSize - outputSize
+    println("Size reduced from ${toMb(inputSize)}MB to ${toMb(outputSize)}MB, saved ${toMb(difference)}MB")
     runCatching {
-        @OptIn(ExperimentalPathApi::class)
         tempDir.deleteRecursively()
     }
 }
@@ -232,3 +240,6 @@ private fun zipDirectoryContents(path: Path, root: Path, filename: String, zipOu
         }
     }
 }
+
+fun toMb(bytes: Long): Long =
+    (bytes / 1024.0 / 1024.0).toLong()
