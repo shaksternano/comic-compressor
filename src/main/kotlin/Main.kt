@@ -141,7 +141,6 @@ private suspend fun compressComic(
         val paths = zipFileSystem.rootDirectories.flatMap {
             it.walk()
         }
-        val concurrentTasks = Runtime.getRuntime().availableProcessors()
         ProgressBar("Compressing images", paths.size.toLong()).use { progressBar ->
             coroutineScope {
                 val progressBarStepChannel = Channel<Unit>()
@@ -150,6 +149,7 @@ private suspend fun compressComic(
                         progressBar.step()
                     }
                 }
+                val concurrentTasks = Runtime.getRuntime().availableProcessors()
                 paths.asSequence()
                     .chunked(concurrentTasks)
                     .forEach { zippedPaths ->
