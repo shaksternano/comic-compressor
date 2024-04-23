@@ -11,6 +11,7 @@ import me.tongfei.progressbar.ProgressBar
 import org.apache.commons.cli.*
 import java.nio.file.FileSystems
 import java.nio.file.Path
+import java.text.DecimalFormat
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.*
@@ -97,7 +98,7 @@ suspend fun main(args: Array<String>) {
         }
         .toList()
 
-    println("Compressing ${comicFiles.size} comics at $compressionLevel% compression...")
+    println("Compressing ${comicFiles.size} comics at ${DecimalFormat("0.#").format(compressionLevel)}% compression...")
     println()
     comicFiles.forEachIndexed { index, path ->
         runCatching {
