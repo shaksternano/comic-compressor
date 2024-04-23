@@ -12,6 +12,7 @@ repositories {
 }
 
 dependencies {
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
     implementation("commons-cli:commons-cli:1.7.0")
     implementation("com.fewlaps.slimjpg:slimjpg:1.3.3")
     implementation("me.tongfei:progressbar:0.10.1")

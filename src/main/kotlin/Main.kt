@@ -1,8 +1,12 @@
 package io.github.shaksternano.comiccompressor
 
 import com.fewlaps.slimjpg.SlimJpg
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withContext
 import me.tongfei.progressbar.ProgressBar
 import org.apache.commons.cli.*
 import java.nio.file.FileSystems
@@ -143,40 +147,71 @@ private suspend fun compressComic(
         }
         ProgressBar("Compressing images", paths.size.toLong()).use { progressBar ->
             coroutineScope {
+                val maxConcurrentTasks = Runtime.getRuntime().availableProcessors()
+
+                val readChannel = Channel<Path>(maxConcurrentTasks)
+                val compressChannel = Channel<Pair<Path, ByteArray>>(maxConcurrentTasks)
+                val writeChannel = Channel<Pair<Path, ByteArray>>(maxConcurrentTasks)
                 val progressBarStepChannel = Channel<Unit>()
+
+                launch {
+                    paths.forEach { zippedPath ->
+                        readChannel.send(zippedPath)
+                    }
+                    readChannel.close()
+                }
+
+                launch {
+                    for (zippedPath in readChannel) {
+                        val imageBytes = zippedPath.readBytes()
+                        compressChannel.send(zippedPath to imageBytes)
+                    }
+                    compressChannel.close()
+                }
+
+                launch {
+                    coroutineScope {
+                        val semaphore = Semaphore(maxConcurrentTasks)
+                        for ((zippedPath, imageBytes) in compressChannel) {
+                            semaphore.acquire()
+                            launch {
+                                try {
+                                    val compressedImageData = zippedPath to runCatching {
+                                        compressJpg(imageBytes, compressionLevel)
+                                    }.getOrElse {
+                                        println("Failed to compress $zippedPath in $comicFile")
+                                        it.printStackTrace()
+                                        imageBytes
+                                    }
+                                    writeChannel.send(compressedImageData)
+                                } finally {
+                                    semaphore.release()
+                                }
+                            }
+                        }
+                    }
+                    writeChannel.close()
+                }
+
+                launch {
+                    for ((zippedPath, compressedImageBytes) in writeChannel) {
+                        val tempFileDir = tempDir.resolve(zippedPath.parent.toString().removePrefix("/"))
+                        val tempFile = tempFileDir.resolve(zippedPath.nameWithoutExtension + ".jpg")
+                        tempDir.relativize(tempFile).forEach {
+                            it.toFile().deleteOnExit()
+                        }
+                        tempFile.createParentDirectories()
+                        tempFile.writeBytes(compressedImageBytes)
+                        progressBarStepChannel.send(Unit)
+                    }
+                    progressBarStepChannel.close()
+                }
+
                 launch {
                     for (unused in progressBarStepChannel) {
                         progressBar.step()
                     }
                 }
-                val concurrentTasks = Runtime.getRuntime().availableProcessors()
-                paths.asSequence()
-                    .chunked(concurrentTasks)
-                    .forEach { zippedPaths ->
-                        val compressedImages = zippedPaths.map { zippedPath ->
-                            zippedPath to zippedPath.readBytes()
-                        }.parallelMap { (zippedFile, imageBytes) ->
-                            zippedFile to runCatching {
-                                compressJpg(imageBytes, compressionLevel)
-                            }.getOrElse {
-                                println("Failed to compress $zippedFile in $comicFile")
-                                it.printStackTrace()
-                                imageBytes
-                            }.also {
-                                progressBarStepChannel.send(Unit)
-                            }
-                        }
-                        compressedImages.forEach { (zippedFile, compressedImageBytes) ->
-                            val tempFileDir = tempDir.resolve(zippedFile.parent.toString().removePrefix("/"))
-                            val tempFile = tempFileDir.resolve(zippedFile.nameWithoutExtension + ".jpg")
-                            tempDir.relativize(tempFile).forEach {
-                                it.toFile().deleteOnExit()
-                            }
-                            tempFile.createParentDirectories()
-                            tempFile.writeBytes(compressedImageBytes)
-                        }
-                    }
-                progressBarStepChannel.close()
             }
         }
     }
@@ -191,13 +226,6 @@ private suspend fun compressComic(
         tempDir.deleteRecursively()
     }
 }
-
-suspend fun <T, R> Iterable<T>.parallelMap(transform: suspend (T) -> R): List<R> =
-    if (this is Collection && size <= 1)
-        map { transform(it) }
-    else coroutineScope {
-        map { async { transform(it) } }.awaitAll()
-    }
 
 private fun compressJpg(jpgBytes: ByteArray, compressionLevel: Double): ByteArray =
     SlimJpg.file(jpgBytes)
