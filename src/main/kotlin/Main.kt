@@ -131,7 +131,7 @@ private suspend fun compressComic(
     compressionLevel: Double,
     comicNumber: Int,
     totalComics: Int
-) = coroutineScope {
+) {
     println("Compressing comic $comicNumber/$totalComics \"$comicFile\"...")
     val tempDir = createTempDirectory(comicFile.nameWithoutExtension + "-" + comicFile.extension)
     tempDir.toFile().deleteOnExit()
@@ -143,40 +143,41 @@ private suspend fun compressComic(
         }
         val concurrentTasks = Runtime.getRuntime().availableProcessors()
         ProgressBar("Compressing images", paths.size.toLong()).use { progressBar ->
-            val progressBarStepChannel = Channel<Unit>()
-            launch {
-                progressBarStepChannel.receive()
-                for (unused in progressBarStepChannel) {
-                    progressBar.step()
+            coroutineScope {
+                val progressBarStepChannel = Channel<Unit>()
+                launch {
+                    for (unused in progressBarStepChannel) {
+                        progressBar.step()
+                    }
                 }
+                paths.asSequence()
+                    .chunked(concurrentTasks)
+                    .forEach { zippedPaths ->
+                        val compressedImages = zippedPaths.map { zippedPath ->
+                            zippedPath to zippedPath.readBytes()
+                        }.parallelMap { (zippedFile, imageBytes) ->
+                            zippedFile to runCatching {
+                                compressJpg(imageBytes, compressionLevel)
+                            }.getOrElse {
+                                println("Failed to compress $zippedFile in $comicFile")
+                                it.printStackTrace()
+                                imageBytes
+                            }.also {
+                                progressBarStepChannel.send(Unit)
+                            }
+                        }
+                        compressedImages.forEach { (zippedFile, compressedImageBytes) ->
+                            val tempFileDir = tempDir.resolve(zippedFile.parent.toString().removePrefix("/"))
+                            val tempFile = tempFileDir.resolve(zippedFile.nameWithoutExtension + ".jpg")
+                            tempDir.relativize(tempFile).forEach {
+                                it.toFile().deleteOnExit()
+                            }
+                            tempFile.createParentDirectories()
+                            tempFile.writeBytes(compressedImageBytes)
+                        }
+                    }
+                progressBarStepChannel.close()
             }
-            paths.asSequence()
-                .chunked(concurrentTasks)
-                .forEach { zippedPaths ->
-                    val compressedImages = zippedPaths.map { zippedPath ->
-                        zippedPath to zippedPath.readBytes()
-                    }.parallelMap { (zippedFile, imageBytes) ->
-                        zippedFile to runCatching {
-                            compressJpg(imageBytes, compressionLevel)
-                        }.getOrElse {
-                            println("Failed to compress $zippedFile in $comicFile")
-                            it.printStackTrace()
-                            imageBytes
-                        }.also {
-                            progressBarStepChannel.send(Unit)
-                        }
-                    }
-                    compressedImages.forEach { (zippedFile, compressedImageBytes) ->
-                        val tempFileDir = tempDir.resolve(zippedFile.parent.toString().removePrefix("/"))
-                        val tempFile = tempFileDir.resolve(zippedFile.nameWithoutExtension + ".jpg")
-                        tempDir.relativize(tempFile).forEach {
-                            it.toFile().deleteOnExit()
-                        }
-                        tempFile.createParentDirectories()
-                        tempFile.writeBytes(compressedImageBytes)
-                    }
-                }
-            progressBarStepChannel.close()
         }
     }
     println("Finalizing \"$comicFile\"...")
