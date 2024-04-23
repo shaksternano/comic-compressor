@@ -1,6 +1,8 @@
 package io.github.shaksternano.comiccompressor
 
 import com.fewlaps.slimjpg.SlimJpg
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import me.tongfei.progressbar.ProgressBar
 import org.apache.commons.cli.*
 import java.nio.file.FileSystems
@@ -13,20 +15,25 @@ import kotlin.time.Duration.Companion.milliseconds
 
 private const val DEFAULT_COMPRESSION_LEVEL: Double = 0.5
 
-fun main(args: Array<String>) {
+suspend fun main(args: Array<String>) {
     val startTime = System.currentTimeMillis()
 
     val options = Options()
 
-    val inputOption = Option("i", "input", true, "Input directory")
+    val inputOption = Option("i", "input", true, "Input directory. Default is current directory.")
     inputOption.isRequired = false
     options.addOption(inputOption)
 
-    val outputOption = Option("o", "output", true, "Output directory")
+    val outputOption = Option("o", "output", true, "Output directory. Default is current directory.")
     outputOption.isRequired = false
     options.addOption(outputOption)
 
-    val compressionLevelOption = Option("c", "compression-level", true, "Compression level")
+    val compressionLevelOption = Option(
+        "c",
+        "compression-level",
+        true,
+        "Compression level between 0 and 100. Higher values result in more compression. Default is $DEFAULT_COMPRESSION_LEVEL."
+    )
     compressionLevelOption.isRequired = false
     options.addOption(compressionLevelOption)
 
@@ -65,7 +72,7 @@ fun main(args: Array<String>) {
         exitProcess(1)
     } ?: DEFAULT_COMPRESSION_LEVEL
     if (compressionLevel !in 0.0..100.0) {
-        println("Compression level must be between 0 and 100%")
+        println("Compression level must be between 0 and 100")
         exitProcess(1)
     }
 
@@ -85,6 +92,9 @@ fun main(args: Array<String>) {
             it.extension.equals("cbz", true) && !it.startsWith(outputDirectory)
         }
         .toList()
+
+    println("Compressing ${comicFiles.size} comics at $compressionLevel% compression...")
+    println()
     comicFiles.forEachIndexed { index, path ->
         runCatching {
             val resolvedOutputDirectory = path.parent?.let { parent ->
@@ -95,6 +105,9 @@ fun main(args: Array<String>) {
             } ?: outputDirectory
             val outputPath = resolvedOutputDirectory.resolve(path.fileName)
             compressComic(path, outputPath, compressionLevel, index + 1, comicFiles.size)
+            if (index < comicFiles.size - 1) {
+                println()
+            }
         }.onFailure {
             println("Failed to compress $path")
             it.printStackTrace()
@@ -106,69 +119,110 @@ fun main(args: Array<String>) {
     println("Finished in $runtime")
 }
 
-private fun compressComic(comicFile: Path, output: Path, compressionLevel: Double, comicNumber: Int, totalComics: Int) {
+private suspend fun compressComic(
+    comicFile: Path,
+    output: Path,
+    compressionLevel: Double,
+    comicNumber: Int,
+    totalComics: Int
+) = coroutineScope {
+    println("Compressing comic $comicNumber/$totalComics \"$comicFile\"...")
     val tempDir = createTempDirectory(comicFile.nameWithoutExtension + "-" + comicFile.extension)
     tempDir.toFile().deleteOnExit()
-    FileSystems.newFileSystem(comicFile).use { zipFileSystem ->
+    withContext(Dispatchers.IO) {
+        FileSystems.newFileSystem(comicFile)
+    }.use { zipFileSystem ->
         val paths = zipFileSystem.rootDirectories.flatMap {
             @OptIn(ExperimentalPathApi::class)
             it.walk()
         }
-        println("Compressing $comicFile...")
-        ProgressBar.wrap(paths, "Comic $comicNumber/$totalComics").forEach { zippedFile ->
-            val tempFile = tempDir.resolve(zippedFile.toString().removePrefix("/"))
-            tempDir.relativize(tempFile).forEach {
-                it.toFile().deleteOnExit()
-            }
-            tempFile.createParentDirectories()
-            val extension = zippedFile.extension
-            if (extension.equals("jpg", ignoreCase = true) || extension.equals("jpeg", ignoreCase = true)) {
-                runCatching {
-                    val bytes = compressJpg(zippedFile, compressionLevel)
-                    tempFile.writeBytes(bytes)
-                    return@forEach
-                }.onFailure {
-                    println("Failed to compress $zippedFile in $comicFile")
-                    it.printStackTrace()
+        val concurrentTasks = Runtime.getRuntime().availableProcessors()
+        ProgressBar("Compressing images", paths.size.toLong()).use { progressBar ->
+            val progressBarStepChannel = Channel<Unit>()
+            launch {
+                progressBarStepChannel.receive()
+                for (unused in progressBarStepChannel) {
+                    progressBar.step()
                 }
             }
-            zippedFile.copyTo(tempFile, overwrite = true)
+            paths.asSequence()
+                .chunked(concurrentTasks)
+                .forEach { zippedPaths ->
+                    val compressedImages = zippedPaths.map { zippedPath ->
+                        zippedPath to zippedPath.readBytes()
+                    }.parallelMap { (zippedFile, imageBytes) ->
+                        zippedFile to runCatching {
+                            compressJpg(imageBytes, compressionLevel)
+                        }.getOrElse {
+                            println("Failed to compress $zippedFile in $comicFile")
+                            it.printStackTrace()
+                            imageBytes
+                        }.also {
+                            progressBarStepChannel.send(Unit)
+                        }
+                    }
+                    compressedImages.forEach { (zippedFile, compressedImageBytes) ->
+                        val tempFileDir = tempDir.resolve(zippedFile.parent.toString().removePrefix("/"))
+                        val tempFile = tempFileDir.resolve(zippedFile.nameWithoutExtension + ".jpg")
+                        tempDir.relativize(tempFile).forEach {
+                            it.toFile().deleteOnExit()
+                        }
+                        tempFile.createParentDirectories()
+                        tempFile.writeBytes(compressedImageBytes)
+                    }
+                }
+            progressBarStepChannel.close()
         }
     }
-    zipFile(tempDir, output)
+    println("Finalizing \"$comicFile\"...")
+    zipDirectoryContents(tempDir, output)
+    println("Finished compressing \"$comicFile\"")
     runCatching {
         @OptIn(ExperimentalPathApi::class)
         tempDir.deleteRecursively()
     }
 }
 
-private fun compressJpg(jpgFile: Path, compressionLevel: Double): ByteArray =
-    SlimJpg.file(jpgFile.inputStream())
+suspend fun <T, R> Iterable<T>.parallelMap(transform: suspend (T) -> R): List<R> =
+    if (this is Collection && size <= 1)
+        map { transform(it) }
+    else coroutineScope {
+        map { async { transform(it) } }.awaitAll()
+    }
+
+private fun compressJpg(jpgBytes: ByteArray, compressionLevel: Double): ByteArray =
+    SlimJpg.file(jpgBytes)
         .maxVisualDiff(compressionLevel)
         .keepMetadata()
         .optimize()
         .picture
 
-private fun zipFile(path: Path, output: Path) {
+private fun zipDirectoryContents(path: Path, output: Path) {
     val outputStream = output.outputStream()
     ZipOutputStream(outputStream).use { zipOutputStream ->
-        zipFile(path, path.name, zipOutputStream)
+        zipDirectoryContents(path, path, path.name, zipOutputStream)
     }
 }
 
-private fun zipFile(path: Path, filename: String, zipOutputStream: ZipOutputStream) {
+private fun zipDirectoryContents(path: Path, root: Path, filename: String, zipOutputStream: ZipOutputStream) {
     if (path.isHidden()) {
         return
     }
     if (path.isDirectory()) {
-        val nextEntry = if (filename.endsWith("/")) {
-            ZipEntry(filename)
+        if (path == root) {
+            path.listDirectoryEntries().forEach { entry ->
+                zipDirectoryContents(entry, root, entry.name, zipOutputStream)
+            }
         } else {
-            ZipEntry("$filename/")
-        }
-        zipOutputStream.putNextEntry(nextEntry)
-        path.listDirectoryEntries().forEach { entry ->
-            zipFile(entry, filename + "/" + entry.name, zipOutputStream)
+            val nextEntry = if (filename.endsWith("/")) {
+                ZipEntry(filename)
+            } else {
+                ZipEntry("$filename/")
+            }
+            zipOutputStream.putNextEntry(nextEntry)
+            path.listDirectoryEntries().forEach { entry ->
+                zipDirectoryContents(entry, root, filename + "/" + entry.name, zipOutputStream)
+            }
         }
     } else {
         path.inputStream().use { inputStream ->
