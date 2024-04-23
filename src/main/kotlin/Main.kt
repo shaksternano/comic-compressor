@@ -83,11 +83,11 @@ suspend fun main(args: Array<String>) {
     }
 
     if (!inputDirectory.isDirectory()) {
-        println("Input directory does not exist")
+        println("Input directory \"$inputDirectory\" does not exist")
         return
     }
     if (outputDirectory.isRegularFile()) {
-        println("Output must be a directory")
+        println("Output path \"$outputDirectory\" must be a directory")
         return
     }
     outputDirectory.createDirectories()
