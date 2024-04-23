@@ -110,9 +110,7 @@ suspend fun main(args: Array<String>) {
             } ?: outputDirectory
             val outputPath = resolvedOutputDirectory.resolve(path.fileName)
             compressComic(path, outputPath, compressionLevel, index + 1, comicFiles.size)
-            if (index < comicFiles.size - 1) {
-                println()
-            }
+            println()
         }.onFailure {
             println("Failed to compress $path")
             it.printStackTrace()
