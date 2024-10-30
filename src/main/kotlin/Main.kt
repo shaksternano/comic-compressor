@@ -18,7 +18,7 @@ import kotlin.io.path.*
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.milliseconds
 
-private const val DEFAULT_COMPRESSION_LEVEL: Double = 0.5
+private const val DEFAULT_COMPRESSION_LEVEL: Double = 1.0
 
 @OptIn(ExperimentalPathApi::class)
 suspend fun main(args: Array<String>) {
