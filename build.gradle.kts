@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "1.9.23"
-    id("com.github.johnrengelman.shadow") version "8.1.1"
+    kotlin("jvm") version "2.0.21"
+    id("com.gradleup.shadow") version "8.3.5"
     application
 }
 
@@ -14,8 +14,8 @@ repositories {
 }
 
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
-    implementation("commons-cli:commons-cli:1.7.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    implementation("commons-cli:commons-cli:1.9.0")
     implementation("com.github.fewlaps:slim-jpg:1.3.3")
     implementation("me.tongfei:progressbar:0.10.1")
 
